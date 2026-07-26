@@ -1,0 +1,23 @@
+# Build artifacts
+/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# ── Personal / sensitive user data — must NEVER be committed ──
+# Structured application data and resume text
+/resume.txt
+/fields.json
+# Resume / CV documents in any common format
+/resume.*
+/cv.*
+*.pdf
+*.docx
+*.doc
+*.rtf
+# klawply's launched Chrome profile (contains cookies / job-site logins)
+/chrome-profile/
+# Logs and local data dir
+/klawply.log
+.klawply/
+# Windows "mark of the web" alternate-data-stream files
+*:Zone.Identifier

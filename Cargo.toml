@@ -1,0 +1,46 @@
+[package]
+name = "klawply"
+version = "0.1.0"
+edition = "2024"
+description = "A terminal AI agent that applies to jobs for you, driven by your ChatGPT subscription."
+
+[dependencies]
+# UI — same stack as pekchat-tui.
+ratatui = "0.30.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Async runtime. Unlike pekchat we need the IO/time drivers: the OAuth loopback
+# server, HTTP to OpenAI, and the CDP websocket to Chrome are all real network
+# IO. `enable_all` on a multi-thread runtime covers them.
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "net",
+    "io-util",
+    "time",
+    "process",
+] }
+
+# HTTP for the OAuth token exchange and the ChatGPT backend calls. rustls keeps
+# us off the system OpenSSL.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+    "blocking",
+] }
+
+# Chrome DevTools Protocol client (pure Rust) — connects to a Chrome already
+# started with --remote-debugging-port=9222.
+chromiumoxide = { version = "0.7", features = ["tokio-runtime"] }
+futures = "0.3"
+
+# PKCE (S256) for the OAuth flow.
+sha2 = "0.10"
+rand = "0.8"
+base64 = "0.22"
+urlencoding = "2"
+
+# Open the system browser for the authorize URL.
+webbrowser = "1"
