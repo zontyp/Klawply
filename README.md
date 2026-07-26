@@ -10,12 +10,6 @@ klawply is a terminal AI agent that applies to jobs for you. It's a green-on-bla
 seven-segment TUI built on the same stack as **pekchat-tui** (ratatui + tokio
 channels, with a background agent thread).
 
-```
-  _  _        _         _  _  _        _
- |_/ |_  |_| |_| |  |_| |_ |_ |    |_| . . .
- | \ |_  | | | | |_ | | |    |    |         KLAWPLY
-```
-
 ## What it does
 
 1. **Connect** — on launch it connects your ChatGPT subscription via Codex-style
