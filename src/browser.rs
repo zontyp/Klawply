@@ -123,7 +123,8 @@ impl BrowserSession {
     pub async fn select_custom(&self, trigger: &str, value: &str) -> Result<()> {
         let open = format!(
             r#"(function(){{
-                var el = document.querySelector({sel});
+                var sel = {sel};
+                var el = {query};
                 if (!el) return {{ok:false, err:"dropdown not found"}};
                 el.scrollIntoView({{block:"center"}});
                 ["pointerdown","mousedown","mouseup","click"].forEach(function(t){{
@@ -131,7 +132,8 @@ impl BrowserSession {
                 }});
                 return {{ok:true}};
             }})()"#,
-            sel = json!(trigger)
+            sel = json!(trigger),
+            query = safe_query("sel")
         );
         let opened = self
             .page
@@ -340,6 +342,19 @@ async fn wait_for_ws() -> Result<String> {
     Err("Chrome was launched but its debug port never became ready".into())
 }
 
+/// A JS expression that resolves the selector held in the JS variable named
+/// `var_name`. Falls back to `getElementById` when `querySelector` throws —
+/// real job forms use ids that aren't valid CSS selectors (e.g. ones starting
+/// with a digit like `#280cb238-…`), which would otherwise throw a `SyntaxError`.
+fn safe_query(var_name: &str) -> String {
+    format!(
+        "(function(){{ try {{ return document.querySelector({v}); }} \
+         catch (e) {{ return ({v} && {v}[0] === '#') \
+         ? document.getElementById({v}.slice(1)) : null; }} }})()",
+        v = var_name
+    )
+}
+
 /// Build a self-contained JS expression for one action, with all user values
 /// JSON-escaped so they can't break out of the string.
 fn build_action_script(action: &Action) -> String {
@@ -349,8 +364,18 @@ fn build_action_script(action: &Action) -> String {
     format!(
         r#"(function(){{
             var sel = {sel}, action = {act}, value = {val};
-            var el = document.querySelector(sel);
+            var el = {query};
             if (!el) return {{ok:false, err:"element not found"}};
+            // The model sometimes targets a wrapper (a custom element like
+            // <spl-form-element> or a label/div) rather than the control itself.
+            // Drill into the real input/textarea/select so value-setting works.
+            var TAG = (el.tagName || "").toUpperCase();
+            if (TAG !== "INPUT" && TAG !== "TEXTAREA" && TAG !== "SELECT"
+                && !el.isContentEditable && el.querySelector) {{
+                var inner = el.querySelector(
+                    "input, textarea, select, [contenteditable=true],[contenteditable='']");
+                if (inner) {{ el = inner; TAG = (el.tagName || "").toUpperCase(); }}
+            }}
             el.scrollIntoView({{block:"center"}});
             if (action === "click") {{ el.click(); return {{ok:true}}; }}
             if (action === "check" || action === "uncheck") {{
@@ -359,8 +384,8 @@ fn build_action_script(action: &Action) -> String {
                 el.dispatchEvent(new Event("change", {{bubbles:true}}));
                 return {{ok:true}};
             }}
-            if (action === "select") {{
-                var opts = Array.prototype.slice.call(el.options || []);
+            if (action === "select" && el.options) {{
+                var opts = Array.prototype.slice.call(el.options);
                 var match = opts.find(function(o){{
                     return o.value === value || (o.text || "").trim() === value;
                 }});
@@ -369,18 +394,38 @@ fn build_action_script(action: &Action) -> String {
                 el.dispatchEvent(new Event("change", {{bubbles:true}}));
                 return {{ok:true}};
             }}
-            // default: fill
-            var proto = el.tagName === "TEXTAREA"
-                ? window.HTMLTextAreaElement.prototype
-                : window.HTMLInputElement.prototype;
-            var setter = Object.getOwnPropertyDescriptor(proto, "value");
+            // default: fill. Contenteditable rich-text fields have no value.
+            if (el.isContentEditable) {{
+                el.focus();
+                el.textContent = value;
+                el.dispatchEvent(new Event("input", {{bubbles:true}}));
+                el.dispatchEvent(new Event("change", {{bubbles:true}}));
+                return {{ok:true}};
+            }}
+            // Find the native `value` setter on el's OWN prototype chain. Picking
+            // it by tag name (HTMLInputElement.prototype) throws "Illegal
+            // invocation" when el is a subclass/custom element; walking el's real
+            // chain also intentionally skips React's own-property override.
+            function nativeSetter(node){{
+                for (var p = Object.getPrototypeOf(node); p; p = Object.getPrototypeOf(p)) {{
+                    var d = Object.getOwnPropertyDescriptor(p, "value");
+                    if (d && typeof d.set === "function") return d.set;
+                }}
+                return null;
+            }}
             el.focus();
-            if (setter && setter.set) {{ setter.set.call(el, value); }}
-            else {{ el.value = value; }}
+            var setter = nativeSetter(el);
+            try {{
+                if (setter) setter.call(el, value); else el.value = value;
+            }} catch (e) {{
+                try {{ el.value = value; }}
+                catch (e2) {{ return {{ok:false, err:"cannot set value: " + e2}}; }}
+            }}
             el.dispatchEvent(new Event("input", {{bubbles:true}}));
             el.dispatchEvent(new Event("change", {{bubbles:true}}));
             return {{ok:true}};
-        }})()"#
+        }})()"#,
+        query = safe_query("sel")
     )
 }
 
@@ -459,4 +504,81 @@ mod tests {
         assert_eq!(picked, "Female");
     }
 
+    /// Regression for the SmartRecruiters "Illegal invocation" failure: a field
+    /// wrapped in a custom element whose id is the target. The fill shim must
+    /// drill into the inner <input> and set its value without throwing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore]
+    async fn fills_input_inside_custom_element_wrapper() {
+        let session = BrowserSession::connect().await.expect("connect");
+        session.open_and_capture("about:blank").await.expect("nav");
+        // A custom element (unknown tag → HTMLElement, not HTMLInputElement)
+        // wrapping a real input — mirrors <spl-form-element> on SmartRecruiters.
+        session
+            .page
+            .evaluate(
+                r#"(function(){
+                    document.body.innerHTML =
+                      '<spl-form-element id="first-name-input"><input type=text></spl-form-element>';
+                    return true;
+                })()"#,
+            )
+            .await
+            .expect("setup");
+
+        let action = Action {
+            selector: "#first-name-input".into(),
+            action: "fill".into(),
+            value: "Karan".into(),
+            label: "First name".into(),
+        };
+        session.apply(&action).await.expect("apply fill");
+
+        let got = session
+            .page
+            .evaluate("document.querySelector('#first-name-input input').value")
+            .await
+            .expect("eval")
+            .into_value::<String>()
+            .expect("string");
+        assert_eq!(got, "Karan");
+    }
+
+    /// Regression for the "not a valid selector" failure: an id that starts with
+    /// a digit is not a valid CSS selector, so querySelector throws. The shim
+    /// must fall back to getElementById and still fill the field.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore]
+    async fn fills_field_with_digit_leading_id() {
+        let session = BrowserSession::connect().await.expect("connect");
+        session.open_and_capture("about:blank").await.expect("nav");
+        session
+            .page
+            .evaluate(
+                r#"(function(){
+                    document.body.innerHTML =
+                      '<input id="280cb238-6f0b-49d0-afb0-ba9dc3fdf24a" type=text>';
+                    return true;
+                })()"#,
+            )
+            .await
+            .expect("setup");
+
+        let action = Action {
+            selector: "#280cb238-6f0b-49d0-afb0-ba9dc3fdf24a".into(),
+            action: "fill".into(),
+            value: "hello".into(),
+            label: String::new(),
+        };
+        session.apply(&action).await.expect("apply fill");
+
+        let got = session
+            .page
+            .evaluate("document.getElementById('280cb238-6f0b-49d0-afb0-ba9dc3fdf24a').value")
+            .await
+            .expect("eval")
+            .into_value::<String>()
+            .expect("string");
+        assert_eq!(got, "hello");
+    }
 }
